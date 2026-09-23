@@ -1,7 +1,8 @@
 use std::{
     fmt::{Debug, Display},
     hash::Hash,
-    ops::{Add, AddAssign, Sub, SubAssign},
+    iter::Sum,
+    ops::{Add, AddAssign, Mul, Sub, SubAssign},
     str::FromStr,
 };
 
@@ -12,12 +13,14 @@ pub trait AStarCost:
     From<u8>
     + Add<Output = Self>
     + Sub<Output = Self>
+    + Mul<Output = Self>
     + SaturatingAdd
     + SaturatingSub
     + CheckedAdd
     + CheckedSub
     + AddAssign
     + SubAssign
+    + Sum
     + FromStr
     + Zero
     + Bounded
@@ -106,6 +109,14 @@ macro_rules! primitive_cost {
             }
         }
 
+        impl std::ops::Mul for $name {
+            type Output = Self;
+
+            fn mul(self, rhs: Self) -> Self::Output {
+                Self(self.0.checked_mul(rhs.0).unwrap_or_else(|| panic!("Overflow when multiplying costs {self} * {rhs}")))
+            }
+        }
+
         impl num_traits::SaturatingAdd for $name {
             fn saturating_add(&self, rhs: &Self) -> Self {
                 Self(self.0.saturating_add(rhs.0))
@@ -139,6 +150,12 @@ macro_rules! primitive_cost {
         impl std::ops::SubAssign for $name {
             fn sub_assign(&mut self, rhs: Self) {
                 *self = *self - rhs;
+            }
+        }
+
+        impl std::iter::Sum for $name {
+            fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+                iter.fold(Self::zero(), |acc, x| acc + x)
             }
         }
 
@@ -265,6 +282,14 @@ impl<A: Sub<Output = A>, B: Sub<Output = B>> Sub for OrderedPairCost<A, B> {
     }
 }
 
+impl<A: Mul<Output = A>, B: Mul<Output = B>> Mul for OrderedPairCost<A, B> {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        Self(self.0 * rhs.0, self.1 * rhs.1)
+    }
+}
+
 impl<A: FromStr, B: FromStr> FromStr for OrderedPairCost<A, B> {
     type Err = ();
 
@@ -325,5 +350,11 @@ impl<A: SaturatingAdd, B: SaturatingAdd> SaturatingAdd for OrderedPairCost<A, B>
 impl<A: SaturatingSub, B: SaturatingSub> SaturatingSub for OrderedPairCost<A, B> {
     fn saturating_sub(&self, rhs: &Self) -> Self {
         Self(self.0.saturating_sub(&rhs.0), self.1.saturating_sub(&rhs.1))
+    }
+}
+
+impl<A: Sum + Zero, B: Sum + Zero> Sum for OrderedPairCost<A, B> {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::zero(), |acc, x| acc + x)
     }
 }

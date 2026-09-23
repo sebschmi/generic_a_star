@@ -31,7 +31,7 @@ checksum = "4498b32ba502fde3cf5a0eea38dced8d8e69404501e7692014371fa6c49c8bd9"
 
 [[package]]
 name = "generic_a_star"
-version = "7.0.2"
+version = "7.0.3"
 dependencies = [
  "binary-heap-plus",
  "compare",

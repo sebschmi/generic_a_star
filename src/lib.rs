@@ -22,6 +22,8 @@ pub mod comparator;
 pub mod cost;
 pub mod open_lists;
 pub mod reset;
+#[cfg(test)]
+mod tests;
 
 const DEBUG_ASTAR: bool = false;
 

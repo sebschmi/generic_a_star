@@ -352,15 +352,17 @@ impl<
                 if last_node.is_none() {
                     unreachable!("Open list was empty.");
                 };
-                if applied_cost_limit {
+                if target_identifier.is_some() {
+                    // If we found a target, then we can break the loop and return it normally.
+                    // This branch is taken if the search is label-correcting, and all nodes have costs at most the lowest target cost.
+                    // The cost limit only pruned nodes more expensive than the limit, and hence more expensive than the target,
+                    // so the target is optimal even if the cost limit was applied.
+                    break;
+                } else if applied_cost_limit {
                     self.state = AStarState::Terminated {
                         result: AStarResult::ExceededCostLimit { cost_limit },
                     };
                     return AStarResult::ExceededCostLimit { cost_limit };
-                } else if target_identifier.is_some() {
-                    // If we found a target, then we can break the loop and return it normally.
-                    // This branch is taken if the search is label-correcting, and all nodes have costs at most the lowest target cost.
-                    break;
                 } else {
                     self.state = AStarState::Terminated {
                         result: AStarResult::NoTarget,

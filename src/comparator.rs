@@ -8,6 +8,7 @@ use crate::AStarNode;
 pub struct AStarNodeComparator;
 
 impl<T: AStarNode> Compare<T> for AStarNodeComparator {
+    #[inline]
     fn compare(&self, l: &T, r: &T) -> Ordering {
         l.cmp(r).reverse().then_with(|| {
             l.secondary_maximisable_score()

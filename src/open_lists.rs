@@ -29,24 +29,29 @@ pub trait AStarOpenList<Node: AStarNode>: Reset + Extend<Node> {
 }
 
 impl<Node: AStarNode> AStarOpenList<Node> for BinaryHeap<Node, AStarNodeComparator> {
+    #[inline]
     fn new() -> Self {
         BinaryHeap::from_vec(Vec::new())
     }
 
+    #[inline]
     fn len(&self) -> usize {
         Self::len(self)
     }
 
+    #[inline]
     fn push(&mut self, node: Node) {
         Self::push(self, node);
     }
 
+    #[inline]
     fn pop_min(&mut self) -> Option<Node> {
         Self::pop(self)
     }
 }
 
 impl<Node, Comparator> Reset for BinaryHeap<Node, Comparator> {
+    #[inline]
     fn reset(&mut self) {
         self.clear();
     }

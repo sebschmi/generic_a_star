@@ -779,30 +779,37 @@ impl<T: AStarNode> AStarNode for Box<T> {
 
     type Cost = <T as AStarNode>::Cost;
 
+    #[inline]
     fn identifier(&self) -> &Self::Identifier {
         <T as AStarNode>::identifier(self)
     }
 
+    #[inline]
     fn cost(&self) -> Self::Cost {
         <T as AStarNode>::cost(self)
     }
 
+    #[inline]
     fn a_star_lower_bound(&self) -> Self::Cost {
         <T as AStarNode>::a_star_lower_bound(self)
     }
 
+    #[inline]
     fn secondary_maximisable_score(&self) -> usize {
         <T as AStarNode>::secondary_maximisable_score(self)
     }
 
+    #[inline]
     fn predecessor(&self) -> Option<&Self::Identifier> {
         <T as AStarNode>::predecessor(self)
     }
 
+    #[inline]
     fn predecessor_edge_type(&self) -> Option<Self::EdgeType> {
         <T as AStarNode>::predecessor_edge_type(self)
     }
 
+    #[inline]
     fn required_memory() -> usize {
         <T as AStarNode>::required_memory() + std::mem::size_of::<Box<()>>()
     }

@@ -91,22 +91,27 @@ pub trait AStarClosedList<Node: AStarNode>: Reset {
 impl<Node: AStarNode> AStarClosedList<Node>
     for FxHashMapSeed<<Node as AStarNode>::Identifier, Node>
 {
+    #[inline]
     fn new() -> Self {
         FxHashMapSeed::with_hasher(FxSeededState::with_seed(0))
     }
 
+    #[inline]
     fn len(&self) -> usize {
         Self::len(self)
     }
 
+    #[inline]
     fn insert(&mut self, identifier: <Node as AStarNode>::Identifier, node: Node) -> Option<Node> {
         Self::insert(self, identifier, node)
     }
 
+    #[inline]
     fn get(&self, identifier: &<Node as AStarNode>::Identifier) -> Option<&Node> {
         Self::get(self, identifier)
     }
 
+    #[inline]
     fn iter<'this: 'node, 'node>(
         &'this self,
     ) -> impl use<'this, 'node, Node> + Iterator<Item = &'node Node>
@@ -118,6 +123,7 @@ impl<Node: AStarNode> AStarClosedList<Node>
 }
 
 impl<Identifier, Node> Reset for FxHashMapSeed<Identifier, Node> {
+    #[inline]
     fn reset(&mut self) {
         self.clear();
     }

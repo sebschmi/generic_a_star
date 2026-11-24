@@ -11,6 +11,7 @@ pub struct LinearHeap<Node: AStarNode> {
 }
 
 impl<Node: AStarNode> AStarOpenList<Node> for LinearHeap<Node> {
+    #[inline]
     fn new() -> Self {
         Self {
             heap: Default::default(),
@@ -19,6 +20,7 @@ impl<Node: AStarNode> AStarOpenList<Node> for LinearHeap<Node> {
         }
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.len
     }
@@ -79,6 +81,7 @@ impl<Node: AStarNode> Extend<Node> for LinearHeap<Node> {
 }
 
 impl<Node: AStarNode> Reset for LinearHeap<Node> {
+    #[inline]
     fn reset(&mut self) {
         self.heap.clear();
         self.cost_offset = Zero::zero();

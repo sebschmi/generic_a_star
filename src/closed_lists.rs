@@ -58,16 +58,25 @@ pub trait AStarClosedList<Node: AStarNode>: Reset {
                         let mut node = node;
                         let mut out = String::new();
 
+                        // The predecessor of a node may not be closed yet, if the node is checked when it is generated.
                         writeln!(out, "previous_visit:").unwrap();
                         while let Some(predecessor) = previous_visit.predecessor() {
                             writeln!(out, "{previous_visit}").unwrap();
-                            previous_visit = self.get(predecessor).unwrap();
+                            let Some(predecessor) = self.get(predecessor) else {
+                                writeln!(out, "predecessor {predecessor:?} (not closed)").unwrap();
+                                break;
+                            };
+                            previous_visit = predecessor;
                         }
 
                         writeln!(out, "\nnode:").unwrap();
                         while let Some(predecessor) = node.predecessor() {
                             writeln!(out, "{node}").unwrap();
-                            node = self.get(predecessor).unwrap();
+                            let Some(predecessor) = self.get(predecessor) else {
+                                writeln!(out, "predecessor {predecessor:?} (not closed)").unwrap();
+                                break;
+                            };
+                            node = predecessor;
                         }
 
                         out

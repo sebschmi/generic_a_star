@@ -28,3 +28,10 @@ impl<const N: usize, T: Reset> Reset for [T; N] {
         self.iter_mut().for_each(Reset::reset);
     }
 }
+
+impl<Key, Value> Reset for rustc_hash::FxHashMapSeed<Key, Value> {
+    #[inline]
+    fn reset(&mut self) {
+        self.clear();
+    }
+}

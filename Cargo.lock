@@ -24,23 +24,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "120133d4db2ec47efe2e26502ee984747630c67f51974fca0b6c1340cf2368d3"
 
 [[package]]
-name = "extend_map"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4498b32ba502fde3cf5a0eea38dced8d8e69404501e7692014371fa6c49c8bd9"
-
-[[package]]
 name = "generic_a_star"
 version = "8.0.3"
 dependencies = [
  "binary-heap-plus",
  "compare",
- "extend_map",
+ "hashbrown",
  "log",
  "num-traits",
  "rustc-hash",
  "serde",
 ]
+
+[[package]]
+name = "hashbrown"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 
 [[package]]
 name = "log"

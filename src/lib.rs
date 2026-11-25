@@ -6,17 +6,18 @@ use std::{
     marker::PhantomData,
 };
 
-use binary_heap_plus::BinaryHeap;
-use comparator::AStarNodeComparator;
 use cost::AStarCost;
-use extend_map::ExtendFilter;
 use log::trace;
 use num_traits::{Bounded, Zero};
 use reset::Reset;
-use rustc_hash::FxHashMapSeed;
 
-use crate::{closed_lists::AStarClosedList, open_lists::AStarOpenList};
+use crate::{
+    arena::NodeArena,
+    closed_lists::{AStarClosedList, HashClosedList},
+    open_lists::{AStarOpenList, binary_heap::BinaryHeap},
+};
 
+pub mod arena;
 pub mod closed_lists;
 pub mod comparator;
 pub mod cost;
@@ -133,34 +134,83 @@ pub enum AStarState<NodeIdentifier, Cost> {
     },
 }
 
+/// The A* algorithm.
+///
+/// All nodes are stored in a [`NodeArena`], and the open and closed lists refer to them by [`NodeIndex`](arena::NodeIndex).
+/// Nodes that are dropped from the search (because they are dominated or exceed the cost limit) free their slot for reuse.
 #[derive(Debug)]
 pub struct AStar<
     Context: AStarContext,
-    ClosedList: AStarClosedList<Context::Node> = FxHashMapSeed<
-        <<Context as AStarContext>::Node as AStarNode>::Identifier,
-        <Context as AStarContext>::Node,
-    >,
-    OpenList: AStarOpenList<Context::Node> = BinaryHeap<
-        <Context as AStarContext>::Node,
-        AStarNodeComparator,
-    >,
+    ClosedList: AStarClosedList<Context::Node> = HashClosedList,
+    OpenList: AStarOpenList<Context::Node> = BinaryHeap<<Context as AStarContext>::Node>,
 > {
     state: AStarState<<Context::Node as AStarNode>::Identifier, <Context::Node as AStarNode>::Cost>,
     context: Context,
+    nodes: NodeArena<Context::Node>,
     closed_list: ClosedList,
     open_list: OpenList,
     performance_counters: AStarPerformanceCounters,
 }
 
+/// The memory of an [`AStar`] without its context, to be reused by another search.
 #[derive(Debug)]
 pub struct AStarBuffers<
     Node: AStarNode,
-    ClosedList: AStarClosedList<Node> = FxHashMapSeed<<Node as AStarNode>::Identifier, Node>,
-    OpenList: AStarOpenList<Node> = BinaryHeap<Node, AStarNodeComparator>,
+    ClosedList: AStarClosedList<Node> = HashClosedList,
+    OpenList: AStarOpenList<Node> = BinaryHeap<Node>,
 > {
+    nodes: NodeArena<Node>,
     closed_list: ClosedList,
     open_list: OpenList,
     phantom_data: PhantomData<Node>,
+}
+
+/// Inserts generated successors into the arena and the open list,
+/// unless they exceed the cost limit or are dominated by the closed list.
+struct SuccessorSink<
+    'a,
+    Node: AStarNode,
+    ClosedList: AStarClosedList<Node>,
+    OpenList: AStarOpenList<Node>,
+> {
+    nodes: &'a mut NodeArena<Node>,
+    closed_list: &'a ClosedList,
+    open_list: &'a mut OpenList,
+    cost_limit: Node::Cost,
+    is_label_setting: bool,
+    applied_cost_limit: bool,
+    pushed: usize,
+    skipped: usize,
+}
+
+impl<Node: AStarNode, ClosedList: AStarClosedList<Node>, OpenList: AStarOpenList<Node>> Extend<Node>
+    for SuccessorSink<'_, Node, ClosedList, OpenList>
+{
+    #[inline]
+    fn extend<T: IntoIterator<Item = Node>>(&mut self, iter: T) {
+        // Internal iteration (`for_each`) is faster than a `for` loop for chained and flattened iterators.
+        iter.into_iter().for_each(|successor| {
+            if successor.cost() + successor.a_star_lower_bound() > self.cost_limit {
+                self.applied_cost_limit = true;
+                return;
+            }
+
+            // Drop successors that the closed list already dominates.
+            // They would be skipped when popped anyway, so this only saves the work of pushing and popping them.
+            // A closed node is never replaced by a worse one, so a successor that is skipped here would also be skipped when popped.
+            if self
+                .closed_list
+                .can_skip_node(&successor, self.nodes, self.is_label_setting)
+            {
+                self.skipped += 1;
+                return;
+            }
+
+            let index = self.nodes.insert(successor);
+            self.open_list.push(index, self.nodes);
+            self.pushed += 1;
+        });
+    }
 }
 
 #[derive(Debug, Clone, Ord, PartialOrd, PartialEq, Eq, Hash, Default)]
@@ -218,6 +268,7 @@ impl<
         Self {
             state: AStarState::Empty,
             context,
+            nodes: NodeArena::new(),
             closed_list: ClosedList::new(),
             open_list: OpenList::new(),
             performance_counters: Default::default(),
@@ -228,11 +279,13 @@ impl<
         context: Context,
         mut buffers: AStarBuffers<Context::Node, ClosedList, OpenList>,
     ) -> Self {
+        buffers.nodes.reset();
         buffers.closed_list.reset();
         buffers.open_list.reset();
         Self {
             state: AStarState::Empty,
             context,
+            nodes: buffers.nodes,
             closed_list: buffers.closed_list,
             open_list: buffers.open_list,
             performance_counters: Default::default(),
@@ -260,6 +313,7 @@ impl<
 
     pub fn into_buffers(self) -> AStarBuffers<Context::Node, ClosedList, OpenList> {
         AStarBuffers {
+            nodes: self.nodes,
             closed_list: self.closed_list,
             open_list: self.open_list,
             phantom_data: Default::default(),
@@ -270,11 +324,11 @@ impl<
         &self,
         node_identifier: &<Context::Node as AStarNode>::Identifier,
     ) -> Option<&Context::Node> {
-        self.closed_list.get(node_identifier)
+        self.closed_list.get(node_identifier, &self.nodes)
     }
 
     pub fn iter_closed_nodes(&self) -> impl Iterator<Item = &Context::Node> {
-        self.closed_list.iter()
+        self.closed_list.iter(&self.nodes)
     }
 
     pub fn performance_counters(&self) -> &AStarPerformanceCounters {
@@ -284,6 +338,7 @@ impl<
     pub fn reset(&mut self) {
         self.state = AStarState::Empty;
         self.context.reset();
+        self.nodes.reset();
         self.closed_list.reset();
         self.open_list.reset();
         self.performance_counters = Default::default();
@@ -297,7 +352,8 @@ impl<
         assert_eq!(self.state, AStarState::Empty);
 
         self.state = AStarState::Init;
-        self.open_list.push(node(&self.context));
+        let index = self.nodes.insert(node(&self.context));
+        self.open_list.push(index, &self.nodes);
     }
 
     pub fn search(
@@ -348,7 +404,7 @@ impl<
         let mut target_secondary_maximisable_score = 0;
 
         loop {
-            let Some(node) = self.open_list.pop_min() else {
+            let Some(node_index) = self.open_list.pop_min(&self.nodes) else {
                 if last_node.is_none() {
                     unreachable!("Open list was empty.");
                 };
@@ -370,10 +426,14 @@ impl<
                     return AStarResult::NoTarget;
                 }
             };
+            // The node is moved out of the arena while it is processed, and its slot is either filled again
+            // (if the node is closed) or released.
+            let node = self.nodes.take(node_index);
 
             // Check cost limit.
             // Nodes are ordered by cost plus lower bound.
             if node.cost() + node.a_star_lower_bound() > cost_limit {
+                self.nodes.release(node_index);
                 self.state = AStarState::Terminated {
                     result: AStarResult::ExceededCostLimit { cost_limit },
                 };
@@ -382,6 +442,7 @@ impl<
 
             // Check memory limit.
             if self.closed_list.len() + self.open_list.len() > node_count_limit {
+                self.nodes.release(node_index);
                 self.state = AStarState::Terminated {
                     result: AStarResult::ExceededMemoryLimit {
                         max_cost: node.cost(),
@@ -395,6 +456,7 @@ impl<
             // If label-correcting, abort when the first node more expensive than the cheapest target is visited.
             if node.cost() + node.a_star_lower_bound() > target_cost {
                 debug_assert!(!self.context.is_label_setting());
+                self.nodes.release(node_index);
                 break;
             }
 
@@ -412,16 +474,16 @@ impl<
 
             if self
                 .closed_list
-                .can_skip_node(&node, self.context.is_label_setting())
+                .can_skip_node(&node, &self.nodes, self.context.is_label_setting())
             {
                 //println!("Skipping node {node}.");
                 self.performance_counters.suboptimal_opened_nodes += 1;
-                let existing_cost = self.closed_list.get(node.identifier()).unwrap().cost();
-                let existing_secondary_maximisable_score = self
+                let existing = self
                     .closed_list
-                    .get(node.identifier())
-                    .unwrap()
-                    .secondary_maximisable_score();
+                    .get(node.identifier(), &self.nodes)
+                    .unwrap();
+                let existing_cost = existing.cost();
+                let existing_secondary_maximisable_score = existing.secondary_maximisable_score();
 
                 if is_target
                     && (node.cost() < target_cost.min(existing_cost)
@@ -442,13 +504,13 @@ impl<
                         if DEBUG_ASTAR {
                             trace!("Context is label setting, so we return the first target found");
                         }
-                        let previous_visit =
-                            self.closed_list.insert(node.identifier().clone(), node);
+                        self.nodes.put_back(node_index, node);
+                        let had_previous_visit =
+                            self.closed_list.insert(node_index, &mut self.nodes);
                         self.performance_counters.closed_nodes += 1;
                         debug_assert!(
-                            previous_visit.is_none() || !self.context.is_label_setting(),
-                            "Visited node again even though we are label setting:\nprevious: {}",
-                            previous_visit.unwrap(),
+                            !had_previous_visit || !self.context.is_label_setting(),
+                            "Visited node again even though we are label setting",
                         );
                         break;
                     }
@@ -458,7 +520,10 @@ impl<
                             && node.secondary_maximisable_score()
                                 > existing_secondary_maximisable_score))
                 {
-                    let node = self.closed_list.get(node.identifier()).unwrap();
+                    let node = self
+                        .closed_list
+                        .get(node.identifier(), &self.nodes)
+                        .unwrap();
                     // Set target to existing node if it is better.
                     if DEBUG_ASTAR {
                         trace!("Updating target to {node}");
@@ -473,6 +538,7 @@ impl<
                             trace!("Context is label setting, so we return the first target found");
                         }
                         self.performance_counters.closed_nodes += 1;
+                        self.nodes.release(node_index);
                         break;
                     }
                 }
@@ -480,35 +546,25 @@ impl<
                 if DEBUG_ASTAR {
                     trace!("Skipping node {node}");
                 }
+                self.nodes.release(node_index);
                 continue;
             }
 
-            let open_nodes_without_new_successors = self.open_list.len();
-            let closed_list = &self.closed_list;
-            let is_label_setting = self.context.is_label_setting();
-            let mut skipped_successors = 0;
-            self.context.generate_successors(
-                &node,
-                &mut ExtendFilter::new(&mut self.open_list, |successor| {
-                    let within_cost_limit =
-                        successor.cost() + successor.a_star_lower_bound() <= cost_limit;
-                    applied_cost_limit = applied_cost_limit || !within_cost_limit;
-
-                    // Drop successors that the closed list already dominates.
-                    // They would be skipped when popped anyway, so this only saves the work of pushing and popping them.
-                    // A closed node is never replaced by a worse one, so a successor that is skipped here would also be skipped when popped.
-                    if within_cost_limit && closed_list.can_skip_node(successor, is_label_setting) {
-                        skipped_successors += 1;
-                        false
-                    } else {
-                        within_cost_limit
-                    }
-                }),
-            );
+            let mut successors = SuccessorSink {
+                nodes: &mut self.nodes,
+                closed_list: &self.closed_list,
+                open_list: &mut self.open_list,
+                cost_limit,
+                is_label_setting: self.context.is_label_setting(),
+                applied_cost_limit: false,
+                pushed: 0,
+                skipped: 0,
+            };
+            self.context.generate_successors(&node, &mut successors);
+            applied_cost_limit = applied_cost_limit || successors.applied_cost_limit;
             // Skipped successors count as opened and suboptimal, like they did when they were skipped after popping them.
-            self.performance_counters.opened_nodes +=
-                self.open_list.len() - open_nodes_without_new_successors + skipped_successors;
-            self.performance_counters.suboptimal_opened_nodes += skipped_successors;
+            self.performance_counters.opened_nodes += successors.pushed + successors.skipped;
+            self.performance_counters.suboptimal_opened_nodes += successors.skipped;
 
             if is_target
                 && (node.cost() < target_cost
@@ -527,19 +583,21 @@ impl<
                     if DEBUG_ASTAR {
                         trace!("Context is label setting, so we return the first target found");
                     }
-                    let previous_visit = self.closed_list.insert(node.identifier().clone(), node);
+                    self.nodes.put_back(node_index, node);
+                    let had_previous_visit = self.closed_list.insert(node_index, &mut self.nodes);
                     self.performance_counters.closed_nodes += 1;
-                    debug_assert!(previous_visit.is_none() || !self.context.is_label_setting());
+                    debug_assert!(!had_previous_visit || !self.context.is_label_setting());
                     break;
                 }
             }
 
-            let previous_visit = self.closed_list.insert(node.identifier().clone(), node);
+            self.nodes.put_back(node_index, node);
+            let had_previous_visit = self.closed_list.insert(node_index, &mut self.nodes);
             self.performance_counters.closed_nodes += 1;
             debug_assert!(
-                previous_visit.is_none() || !self.context.is_label_setting(),
+                !had_previous_visit || !self.context.is_label_setting(),
                 "Node was visited previously: {}",
-                previous_visit.unwrap()
+                self.nodes[node_index],
             );
         }
 
@@ -551,12 +609,12 @@ impl<
             return AStarResult::NoTarget;
         };
 
-        let cost = self.closed_list.get(&target_identifier).unwrap().cost();
+        let cost = self.closed_node(&target_identifier).unwrap().cost();
         debug_assert_eq!(
             cost,
             target_cost,
             "Target node has lower cost than target_cost:\nnode: {}\ntarget_cost: {target_cost}",
-            self.closed_list.get(&target_identifier).unwrap(),
+            self.closed_node(&target_identifier).unwrap(),
         );
         self.state = AStarState::Terminated {
             result: AStarResult::FoundTarget {
@@ -614,7 +672,10 @@ impl<
         impl use<'_, Context, ClosedList, OpenList>
         + Iterator<Item = <Context::Node as AStarNode>::EdgeType>,
     > {
-        if self.closed_list.contains_identifier(identifier) {
+        if self
+            .closed_list
+            .contains_identifier(identifier, &self.nodes)
+        {
             Some(BacktrackingIterator {
                 a_star: self,
                 current: identifier.clone(),
@@ -641,7 +702,10 @@ impl<
             ),
         >,
     > {
-        if self.closed_list.contains_identifier(identifier) {
+        if self
+            .closed_list
+            .contains_identifier(identifier, &self.nodes)
+        {
             Some(BacktrackingIteratorWithCost {
                 a_star: self,
                 current: identifier.clone(),
@@ -722,7 +786,7 @@ impl<
     type Item = <Context::Node as AStarNode>::EdgeType;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let current = self.a_star.closed_list.get(&self.current).unwrap();
+        let current = self.a_star.closed_node(&self.current).unwrap();
 
         if let Some(predecessor) = current.predecessor().cloned() {
             let predecessor_edge_type = current.predecessor_edge_type().unwrap();
@@ -746,7 +810,7 @@ impl<
     );
 
     fn next(&mut self) -> Option<Self::Item> {
-        let current = self.a_star.closed_list.get(&self.current).unwrap();
+        let current = self.a_star.closed_node(&self.current).unwrap();
         let cost = current.cost();
 
         if let Some(predecessor) = current.predecessor().cloned() {
@@ -764,6 +828,7 @@ impl<Node: AStarNode, ClosedList: AStarClosedList<Node>, OpenList: AStarOpenList
 {
     fn default() -> Self {
         Self {
+            nodes: NodeArena::new(),
             closed_list: ClosedList::new(),
             open_list: OpenList::new(),
             phantom_data: Default::default(),

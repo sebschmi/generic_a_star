@@ -2,7 +2,13 @@ use std::collections::VecDeque;
 
 use num_traits::{Bounded, Zero};
 
-use crate::{AStarNode, cost::AStarCost, open_lists::AStarOpenList, reset::Reset};
+use crate::{
+    AStarNode,
+    arena::{NodeArena, NodeIndex},
+    cost::AStarCost,
+    open_lists::AStarOpenList,
+    reset::Reset,
+};
 
 /// An open list for integer costs that stores one bucket of nodes per cost value.
 ///
@@ -14,7 +20,7 @@ use crate::{AStarNode, cost::AStarCost, open_lists::AStarOpenList, reset::Reset}
 /// and page-fault it in again when the bucket is allocated anew.
 pub struct LinearHeap<Node: AStarNode> {
     /// The bucket at index `i` contains the nodes with cost `cost_offset + i`.
-    heap: VecDeque<Vec<Node>>,
+    heap: VecDeque<Vec<NodeIndex>>,
     /// All buckets before this index are empty.
     front: usize,
     cost_offset: Node::Cost,
@@ -37,8 +43,8 @@ impl<Node: AStarNode> AStarOpenList<Node> for LinearHeap<Node> {
         self.len
     }
 
-    fn push(&mut self, node: Node) {
-        let cost = node.cost();
+    fn push(&mut self, node: NodeIndex, nodes: &NodeArena<Node>) {
+        let cost = nodes[node].cost();
         assert_ne!(cost, Node::Cost::max_value());
 
         if cost < self.cost_offset {
@@ -70,7 +76,7 @@ impl<Node: AStarNode> AStarOpenList<Node> for LinearHeap<Node> {
         self.len += 1;
     }
 
-    fn pop_min(&mut self) -> Option<Node> {
+    fn pop_min(&mut self, _nodes: &NodeArena<Node>) -> Option<NodeIndex> {
         while let Some(front) = self.heap.get_mut(self.front) {
             if front.is_empty() {
                 // Lazily advance the front of the heap, keeping the empty bucket for reuse.
@@ -82,14 +88,6 @@ impl<Node: AStarNode> AStarOpenList<Node> for LinearHeap<Node> {
         }
 
         None
-    }
-}
-
-impl<Node: AStarNode> Extend<Node> for LinearHeap<Node> {
-    fn extend<T: IntoIterator<Item = Node>>(&mut self, iter: T) {
-        for node in iter {
-            self.push(node);
-        }
     }
 }
 
@@ -110,6 +108,7 @@ mod tests {
 
     use crate::{
         AStarNode,
+        arena::NodeArena,
         cost::{AStarCost, U64Cost},
         open_lists::AStarOpenList,
         reset::Reset,
@@ -183,6 +182,7 @@ mod tests {
     /// Costs may be lower than the cost of the last popped node.
     /// Checks the popped nodes against the model.
     fn run(heap: &mut LinearHeap<Node>, seed: u64) {
+        let mut arena = NodeArena::new();
         let mut state = seed;
         let mut next = move || {
             state = state
@@ -199,19 +199,19 @@ mod tests {
                 cost: cost.into(),
                 id,
             };
-            heap.push(node);
+            heap.push(arena.insert(node), &arena);
             model.push(node);
             assert_eq!(heap.len(), model.0.values().map(Vec::len).sum::<usize>());
 
             if next() % 3 != 0 {
-                let node = heap.pop_min();
+                let node = heap.pop_min(&arena).map(|index| arena.remove(index));
                 assert_eq!(node, model.pop_min());
                 last_cost = node.unwrap().cost.as_u64();
             }
         }
 
-        while let Some(node) = heap.pop_min() {
-            assert_eq!(Some(node), model.pop_min());
+        while let Some(index) = heap.pop_min(&arena) {
+            assert_eq!(Some(arena.remove(index)), model.pop_min());
         }
         assert_eq!(model.pop_min(), None);
         assert_eq!(heap.len(), 0);
@@ -239,7 +239,7 @@ mod tests {
         // Emptied buckets are kept.
         heap.reset();
         assert_eq!(heap.len(), 0);
-        assert_eq!(heap.pop_min(), None);
+        assert_eq!(heap.pop_min(&NodeArena::new()), None);
         assert_eq!(heap.heap.len(), buckets);
         assert_eq!(capacity, self::capacity(&heap));
 

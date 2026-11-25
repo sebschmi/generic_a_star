@@ -4,7 +4,9 @@ use std::fmt::Display;
 
 use crate::{
     AStar, AStarContext, AStarIdentifier, AStarNode, AStarResult,
+    closed_lists::{AStarClosedList, HashClosedList},
     cost::{AStarCost, U64Cost},
+    open_lists::{AStarOpenList, linear_heap::LinearHeap},
     reset::Reset,
 };
 
@@ -267,10 +269,27 @@ fn distances(edges: &[(usize, usize, u64)], node_count: usize, source: usize) ->
     distances
 }
 
+/// Every node in the arena is either open or closed: dropped nodes release their slots.
+fn check_no_leaked_nodes<ClosedList: AStarClosedList<Node>, OpenList: AStarOpenList<Node>>(
+    a_star: &AStar<Context, ClosedList, OpenList>,
+    case: &str,
+) {
+    assert_eq!(
+        a_star.nodes.len(),
+        a_star.closed_list.len() + a_star.open_list.len(),
+        "{case}"
+    );
+}
+
 /// Checks that a search finds a target at the shortest distance and that backtracking reproduces that cost.
-fn check_search(a_star: &mut AStar<Context>, distance: Option<u64>, case: &str) {
+fn check_search<ClosedList: AStarClosedList<Node>, OpenList: AStarOpenList<Node>>(
+    a_star: &mut AStar<Context, ClosedList, OpenList>,
+    distance: Option<u64>,
+    case: &str,
+) {
     a_star.initialise();
     let result = a_star.search();
+    check_no_leaked_nodes(a_star, case);
     match distance {
         Some(distance) => {
             assert_eq!(
@@ -333,6 +352,29 @@ fn random_graphs_find_shortest_paths() {
             // Searching again after a reset with reused buffers gives the same result.
             a_star.reset();
             check_search(&mut a_star, distance, &format!("case {case} after reset"));
+
+            // Searching with reused buffers gives the same result.
+            let mut a_star = AStar::new_with_buffers(
+                Context {
+                    lower_bounds: lower_bounds.clone(),
+                    label_setting,
+                    ..Context::new(edges.clone(), target)
+                },
+                a_star.into_buffers(),
+            );
+            check_search(&mut a_star, distance, &format!("case {case} with buffers"));
+
+            // The linear heap gives the same costs.
+            let mut a_star = AStar::<_, HashClosedList, LinearHeap<_>>::new(Context {
+                lower_bounds: lower_bounds.clone(),
+                label_setting,
+                ..Context::new(edges.clone(), target)
+            });
+            check_search(
+                &mut a_star,
+                distance,
+                &format!("case {case} with linear heap"),
+            );
         }
     }
 }
@@ -372,6 +414,7 @@ fn resumed_search_closes_all_nodes_within_cost_limit() {
                 assert_eq!(node.cost, distance.into(), "{case}");
             }
         }
+        check_no_leaked_nodes(&a_star, &case);
         for node in a_star.iter_closed_nodes() {
             assert_eq!(
                 Some(node.cost.as_primitive()),

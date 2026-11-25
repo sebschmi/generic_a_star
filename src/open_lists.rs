@@ -1,13 +1,18 @@
-use binary_heap_plus::BinaryHeap;
+use crate::{
+    AStarNode,
+    arena::{NodeArena, NodeIndex},
+    reset::Reset,
+};
 
-use crate::{AStarNode, comparator::AStarNodeComparator, reset::Reset};
-
+pub mod binary_heap;
 pub mod linear_heap;
 
 /// The open list for the A* algorithm.
 ///
-/// This is a priority queue that must sort nodes with [`AStarNodeComparator`].
-pub trait AStarOpenList<Node: AStarNode>: Reset + Extend<Node> {
+/// This is a priority queue of the indices of nodes stored in a [`NodeArena`].
+/// It must sort nodes with [`AStarNodeComparator`](crate::comparator::AStarNodeComparator).
+/// The nodes of all indices in the open list stay in the arena until they are popped.
+pub trait AStarOpenList<Node: AStarNode>: Reset {
     /// Create a new empty open list.
     fn new() -> Self;
 
@@ -19,40 +24,11 @@ pub trait AStarOpenList<Node: AStarNode>: Reset + Extend<Node> {
         self.len() == 0
     }
 
-    /// Add the given node to the priority queue.
-    fn push(&mut self, node: Node);
+    /// Add the node with the given index to the priority queue.
+    fn push(&mut self, index: NodeIndex, nodes: &NodeArena<Node>);
 
-    /// Removes and returns a minimum element from the priority queue.
+    /// Removes and returns the index of a minimum node from the priority queue.
     ///
     /// Returns `None` if the priority queue is empty.
-    fn pop_min(&mut self) -> Option<Node>;
-}
-
-impl<Node: AStarNode> AStarOpenList<Node> for BinaryHeap<Node, AStarNodeComparator> {
-    #[inline]
-    fn new() -> Self {
-        BinaryHeap::from_vec(Vec::new())
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
-        Self::len(self)
-    }
-
-    #[inline]
-    fn push(&mut self, node: Node) {
-        Self::push(self, node);
-    }
-
-    #[inline]
-    fn pop_min(&mut self) -> Option<Node> {
-        Self::pop(self)
-    }
-}
-
-impl<Node, Comparator> Reset for BinaryHeap<Node, Comparator> {
-    #[inline]
-    fn reset(&mut self) {
-        self.clear();
-    }
+    fn pop_min(&mut self, nodes: &NodeArena<Node>) -> Option<NodeIndex>;
 }

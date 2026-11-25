@@ -484,16 +484,31 @@ impl<
             }
 
             let open_nodes_without_new_successors = self.open_list.len();
+            let closed_list = &self.closed_list;
+            let is_label_setting = self.context.is_label_setting();
+            let mut skipped_successors = 0;
             self.context.generate_successors(
                 &node,
-                &mut ExtendFilter::new(&mut self.open_list, |node| {
-                    let result = node.cost() + node.a_star_lower_bound() <= cost_limit;
-                    applied_cost_limit = applied_cost_limit || !result;
-                    result
+                &mut ExtendFilter::new(&mut self.open_list, |successor| {
+                    let within_cost_limit =
+                        successor.cost() + successor.a_star_lower_bound() <= cost_limit;
+                    applied_cost_limit = applied_cost_limit || !within_cost_limit;
+
+                    // Drop successors that the closed list already dominates.
+                    // They would be skipped when popped anyway, so this only saves the work of pushing and popping them.
+                    // A closed node is never replaced by a worse one, so a successor that is skipped here would also be skipped when popped.
+                    if within_cost_limit && closed_list.can_skip_node(successor, is_label_setting) {
+                        skipped_successors += 1;
+                        false
+                    } else {
+                        within_cost_limit
+                    }
                 }),
             );
+            // Skipped successors count as opened and suboptimal, like they did when they were skipped after popping them.
             self.performance_counters.opened_nodes +=
-                self.open_list.len() - open_nodes_without_new_successors;
+                self.open_list.len() - open_nodes_without_new_successors + skipped_successors;
+            self.performance_counters.suboptimal_opened_nodes += skipped_successors;
 
             if is_target
                 && (node.cost() < target_cost

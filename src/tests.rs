@@ -3,7 +3,9 @@
 use std::fmt::Display;
 
 use crate::{
-    AStar, AStarContext, AStarIdentifier, AStarNode, AStarResult, cost::U64Cost, reset::Reset,
+    AStar, AStarContext, AStarIdentifier, AStarNode, AStarResult,
+    cost::{AStarCost, U64Cost},
+    reset::Reset,
 };
 
 impl AStarIdentifier for usize {}
@@ -13,11 +15,12 @@ struct Node {
     identifier: usize,
     predecessor: Option<usize>,
     cost: U64Cost,
+    lower_bound: U64Cost,
 }
 
 impl Ord for Node {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.cost.cmp(&other.cost)
+        (self.cost + self.lower_bound).cmp(&(other.cost + other.lower_bound))
     }
 }
 
@@ -47,7 +50,7 @@ impl AStarNode for Node {
     }
 
     fn a_star_lower_bound(&self) -> Self::Cost {
-        0u64.into()
+        self.lower_bound
     }
 
     fn secondary_maximisable_score(&self) -> usize {
@@ -66,9 +69,31 @@ impl AStarNode for Node {
 /// A graph given as weighted edges `(from, to, cost)`, with root `0`.
 struct Context {
     edges: Vec<(usize, usize, u64)>,
+    /// The A* lower bound of each node, or zero if the node has no entry.
+    lower_bounds: Vec<u64>,
     target: usize,
     cost_limit: Option<u64>,
     label_setting: bool,
+}
+
+impl Context {
+    fn new(edges: Vec<(usize, usize, u64)>, target: usize) -> Self {
+        Self {
+            edges,
+            lower_bounds: Vec::new(),
+            target,
+            cost_limit: None,
+            label_setting: true,
+        }
+    }
+
+    fn lower_bound(&self, identifier: usize) -> U64Cost {
+        self.lower_bounds
+            .get(identifier)
+            .copied()
+            .unwrap_or(0)
+            .into()
+    }
 }
 
 impl Reset for Context {
@@ -83,6 +108,7 @@ impl AStarContext for Context {
             identifier: 0,
             predecessor: None,
             cost: 0u64.into(),
+            lower_bound: self.lower_bound(0),
         }
     }
 
@@ -95,6 +121,7 @@ impl AStarContext for Context {
                     identifier: to,
                     predecessor: Some(node.identifier),
                     cost: node.cost + U64Cost::from(cost),
+                    lower_bound: self.lower_bound(to),
                 }),
         );
     }
@@ -119,10 +146,9 @@ impl AStarContext for Context {
 fn search(cost_limit: Option<u64>, label_setting: bool) -> AStarResult<usize, U64Cost> {
     // The target 1 has cost 3, the dead end 2 has cost 4.
     let mut a_star = AStar::<_>::new(Context {
-        edges: vec![(0, 1, 3), (0, 2, 4)],
-        target: 1,
         cost_limit,
         label_setting,
+        ..Context::new(vec![(0, 1, 3), (0, 2, 4)], 1)
     });
     a_star.initialise();
     a_star.search()
@@ -151,5 +177,211 @@ fn cost_limit_is_inclusive() {
             },
             "label_setting: {label_setting}",
         );
+    }
+}
+
+/// Successors that are already closed are not pushed into the open list,
+/// but they are still counted as opened and suboptimal nodes.
+#[test]
+fn closed_successors_are_not_pushed() {
+    for label_setting in [true, false] {
+        // Nodes are closed in the order 0, 1, 2, 3, 4.
+        // Closing 2 generates 1 again, which is already closed, and closing 3 generates 2 again.
+        // Without skipping them when generated, the second copy of 1 (cost 52) would still be in the open list
+        // when the target is found.
+        let mut a_star = AStar::<_>::new(Context {
+            label_setting,
+            ..Context::new(
+                vec![
+                    (0, 1, 1),
+                    (0, 2, 2),
+                    (1, 3, 2),
+                    (2, 1, 50),
+                    (3, 2, 1),
+                    (3, 4, 10),
+                ],
+                4,
+            )
+        });
+        a_star.initialise();
+        assert_eq!(
+            a_star.search(),
+            AStarResult::FoundTarget {
+                identifier: 4,
+                cost: 13u64.into(),
+            }
+        );
+        assert_eq!(a_star.open_list.len(), 0, "label_setting: {label_setting}");
+        let counters = a_star.performance_counters();
+        assert_eq!(counters.opened_nodes, 6, "label_setting: {label_setting}");
+        assert_eq!(counters.suboptimal_opened_nodes, 2);
+        assert_eq!(counters.closed_nodes, 5);
+        assert_eq!(a_star.reconstruct_path().len(), 3);
+    }
+}
+
+/// A small deterministic pseudo random number generator (xorshift64*).
+struct Random(u64);
+
+impl Random {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+}
+
+/// Returns a random graph with `node_count` nodes (possibly with cycles and parallel edges).
+fn random_graph(random: &mut Random, node_count: usize) -> Vec<(usize, usize, u64)> {
+    let edge_count = random.below(4 * node_count as u64) as usize;
+    (0..edge_count)
+        .map(|_| {
+            (
+                random.below(node_count as u64) as usize,
+                random.below(node_count as u64) as usize,
+                random.below(10),
+            )
+        })
+        .collect()
+}
+
+/// Shortest distances from `source` (Bellman-Ford), `None` if unreachable.
+fn distances(edges: &[(usize, usize, u64)], node_count: usize, source: usize) -> Vec<Option<u64>> {
+    let mut distances = vec![None; node_count];
+    distances[source] = Some(0);
+    for _ in 0..node_count {
+        for &(from, to, cost) in edges {
+            if let Some(distance) = distances[from] {
+                let distance = distance + cost;
+                if distances[to].is_none_or(|existing| distance < existing) {
+                    distances[to] = Some(distance);
+                }
+            }
+        }
+    }
+    distances
+}
+
+/// Checks that a search finds a target at the shortest distance and that backtracking reproduces that cost.
+fn check_search(a_star: &mut AStar<Context>, distance: Option<u64>, case: &str) {
+    a_star.initialise();
+    let result = a_star.search();
+    match distance {
+        Some(distance) => {
+            assert_eq!(
+                result,
+                AStarResult::FoundTarget {
+                    identifier: a_star.context().target,
+                    cost: distance.into(),
+                },
+                "{case}"
+            );
+            let path_cost: u64 = a_star
+                .backtrack_with_costs()
+                .next()
+                .map(|(_, cost)| cost.as_primitive())
+                .unwrap_or(0);
+            assert_eq!(path_cost, distance, "{case}");
+        }
+        None => assert_eq!(result, AStarResult::NoTarget, "{case}"),
+    }
+}
+
+/// Model-based test: random graphs, label setting with consistent lower bounds (zero and exact),
+/// and label correcting with admissible but inconsistent lower bounds.
+#[test]
+fn random_graphs_find_shortest_paths() {
+    let mut random = Random(0x1234_5678_9abc_def1);
+    for case in 0..2000 {
+        let node_count = 1 + random.below(12) as usize;
+        let edges = random_graph(&mut random, node_count);
+        let target = random.below(node_count as u64) as usize;
+        let distance = distances(&edges, node_count, 0)[target];
+
+        // Exact distances to the target, computed on the reversed graph.
+        // Nodes that cannot reach the target get a large lower bound, which keeps the lower bounds consistent.
+        let reversed: Vec<_> = edges.iter().map(|&(f, t, c)| (t, f, c)).collect();
+        let exact: Vec<u64> = distances(&reversed, node_count, target)
+            .into_iter()
+            .map(|d| d.unwrap_or(1000))
+            .collect();
+
+        for (label_setting, lower_bounds) in [
+            (true, Vec::new()),
+            (true, exact.clone()),
+            (false, Vec::new()),
+            (false, exact.iter().map(|&d| random.below(d + 1)).collect()),
+        ] {
+            let mut a_star = AStar::<_>::new(Context {
+                lower_bounds: lower_bounds.clone(),
+                label_setting,
+                ..Context::new(edges.clone(), target)
+            });
+            check_search(
+                &mut a_star,
+                distance,
+                &format!(
+                    "case {case}: edges {edges:?}, target {target}, label_setting {label_setting}, lower_bounds {lower_bounds:?}"
+                ),
+            );
+
+            // Searching again after a reset with reused buffers gives the same result.
+            a_star.reset();
+            check_search(&mut a_star, distance, &format!("case {case} after reset"));
+        }
+    }
+}
+
+/// Model-based test of a resumed search, as done by tsalign's windowed aligners:
+/// after finding the target, the search is continued until the first node more expensive than a cost limit.
+/// Then every node within the cost limit must be closed with its shortest distance,
+/// and every closed node must have a valid path to the root.
+#[test]
+fn resumed_search_closes_all_nodes_within_cost_limit() {
+    let mut random = Random(0x0fed_cba9_8765_4321);
+    for case in 0..2000 {
+        let node_count = 1 + random.below(12) as usize;
+        let edges = random_graph(&mut random, node_count);
+        let target = random.below(node_count as u64) as usize;
+        let distances = distances(&edges, node_count, 0);
+        let mut a_star = AStar::<_>::new(Context::new(edges.clone(), target));
+        a_star.initialise();
+        let first_result = a_star.search();
+        let case = format!("case {case}: edges {edges:?}, target {target}");
+        let Some(target_distance) = distances[target] else {
+            assert_eq!(first_result, AStarResult::NoTarget, "{case}");
+            continue;
+        };
+        assert_eq!(first_result.cost(), target_distance.into(), "{case}");
+
+        let cost_limit = target_distance + random.below(10);
+        a_star.search_until_with_target_policy(|_, node| node.cost > cost_limit.into(), true);
+
+        for (identifier, distance) in distances.iter().enumerate() {
+            if let Some(distance) = *distance
+                && distance <= cost_limit
+            {
+                let node = a_star.closed_node(&identifier).unwrap_or_else(|| {
+                    panic!("{case}: node {identifier} with distance {distance} is not closed")
+                });
+                assert_eq!(node.cost, distance.into(), "{case}");
+            }
+        }
+        for node in a_star.iter_closed_nodes() {
+            assert_eq!(
+                Some(node.cost.as_primitive()),
+                distances[node.identifier],
+                "{case}: closed node {node}"
+            );
+            assert!(
+                a_star.backtrack_from(&node.identifier).unwrap().count() < node_count,
+                "{case}"
+            );
+        }
     }
 }

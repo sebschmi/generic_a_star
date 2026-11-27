@@ -4,7 +4,6 @@ use std::{
     fmt::{Debug, Display},
     hash::Hash,
     marker::PhantomData,
-    ops::ControlFlow,
 };
 
 use cost::AStarCost;
@@ -214,7 +213,7 @@ struct SuccessorSink<
     pushed: usize,
     skipped: usize,
     /// Set if a successor did not fit into the arena.
-    /// Then all further successors are dropped.
+    /// Then the further successors do not fit either, since the search does not free slots while generating successors.
     arena_full: Option<ArenaFullError>,
 }
 
@@ -227,15 +226,13 @@ impl<
 {
     #[inline]
     fn extend<T: IntoIterator<Item = Node>>(&mut self, iter: T) {
-        if self.arena_full.is_some() {
-            return;
-        }
-
-        // Internal iteration (`try_for_each`) is faster than a `for` loop for chained and flattened iterators.
-        let _ = iter.into_iter().try_for_each(|successor| {
+        // Internal iteration (`for_each`) is faster than a `for` loop for chained and flattened iterators.
+        // It is also faster than `try_for_each`, which falls back to external iteration for iterators that only
+        // implement `fold`. So if the arena is full, the remaining successors are still visited, but dropped.
+        iter.into_iter().for_each(|successor| {
             if successor.cost() + successor.a_star_lower_bound() > self.cost_limit {
                 self.applied_cost_limit = true;
-                return ControlFlow::Continue(());
+                return;
             }
 
             // Drop successors that the closed list already dominates.
@@ -246,19 +243,15 @@ impl<
                 .can_skip_node(&successor, self.nodes, self.is_label_setting)
             {
                 self.skipped += 1;
-                return ControlFlow::Continue(());
+                return;
             }
 
             match self.nodes.insert(successor) {
                 Ok(index) => {
                     self.open_list.push(index, self.nodes);
                     self.pushed += 1;
-                    ControlFlow::Continue(())
                 }
-                Err(error) => {
-                    self.arena_full = Some(error);
-                    ControlFlow::Break(())
-                }
+                Err(error) => self.arena_full = Some(error),
             }
         });
     }

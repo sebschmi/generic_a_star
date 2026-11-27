@@ -202,7 +202,7 @@ mod tests {
                     score: (next() % 3) as usize,
                     id,
                 };
-                heap.push(arena.insert(node), &arena);
+                heap.push(arena.insert(node).unwrap(), &arena);
                 model.push(node);
                 assert_eq!(heap.len(), model.len());
 

@@ -201,7 +201,7 @@ mod tests {
                 cost: cost.into(),
                 id,
             };
-            heap.push(arena.insert(node), &arena);
+            heap.push(arena.insert(node).unwrap(), &arena);
             model.push(node);
             assert_eq!(heap.len(), model.0.values().map(Vec::len).sum::<usize>());
 

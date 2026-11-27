@@ -4,6 +4,7 @@ use std::{
     fmt::{Debug, Display},
     hash::Hash,
     marker::PhantomData,
+    ops::ControlFlow,
 };
 
 use cost::AStarCost;
@@ -12,7 +13,7 @@ use num_traits::{Bounded, Zero};
 use reset::Reset;
 
 use crate::{
-    arena::{ArenaIndex, NodeArena},
+    arena::{ArenaFullError, ArenaIndex, NodeArena},
     closed_lists::{AStarClosedList, HashClosedList},
     open_lists::{AStarOpenList, binary_heap::BinaryHeap},
 };
@@ -132,6 +133,30 @@ pub enum AStarState<NodeIdentifier, Cost> {
     Terminated {
         result: AStarResult<NodeIdentifier, Cost>,
     },
+    /// The algorithm failed with an error.
+    ///
+    /// The search cannot be continued.
+    Failed { error: AStarError },
+}
+
+/// The return type of [`AStar::search`] and its variants:
+/// the outcome of the search, or an error if the search could not be completed.
+pub type AStarSearchResult<Node> =
+    Result<AStarResult<<Node as AStarNode>::Identifier, <Node as AStarNode>::Cost>, AStarError>;
+
+/// An error that stops an A* search.
+///
+/// Unlike the outcomes in [`AStarResult`], an error means that the search could not be completed as requested,
+/// so it is returned as the [`Err`] variant of [`AStar::search`] and its variants.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
+pub enum AStarError {
+    /// The [`NodeArena`] of the search is full.
+    ///
+    /// The search needs more nodes at the same time than its [index type](ArenaIndex) allows.
+    /// Use a larger index type, e.g. `u64` instead of the default `u32`.
+    #[error(transparent)]
+    ArenaFull(#[from] ArenaFullError),
 }
 
 /// The A* algorithm.
@@ -188,6 +213,9 @@ struct SuccessorSink<
     applied_cost_limit: bool,
     pushed: usize,
     skipped: usize,
+    /// Set if a successor did not fit into the arena.
+    /// Then all further successors are dropped.
+    arena_full: Option<ArenaFullError>,
 }
 
 impl<
@@ -199,11 +227,15 @@ impl<
 {
     #[inline]
     fn extend<T: IntoIterator<Item = Node>>(&mut self, iter: T) {
-        // Internal iteration (`for_each`) is faster than a `for` loop for chained and flattened iterators.
-        iter.into_iter().for_each(|successor| {
+        if self.arena_full.is_some() {
+            return;
+        }
+
+        // Internal iteration (`try_for_each`) is faster than a `for` loop for chained and flattened iterators.
+        let _ = iter.into_iter().try_for_each(|successor| {
             if successor.cost() + successor.a_star_lower_bound() > self.cost_limit {
                 self.applied_cost_limit = true;
-                return;
+                return ControlFlow::Continue(());
             }
 
             // Drop successors that the closed list already dominates.
@@ -214,12 +246,20 @@ impl<
                 .can_skip_node(&successor, self.nodes, self.is_label_setting)
             {
                 self.skipped += 1;
-                return;
+                return ControlFlow::Continue(());
             }
 
-            let index = self.nodes.insert(successor);
-            self.open_list.push(index, self.nodes);
-            self.pushed += 1;
+            match self.nodes.insert(successor) {
+                Ok(index) => {
+                    self.open_list.push(index, self.nodes);
+                    self.pushed += 1;
+                    ControlFlow::Continue(())
+                }
+                Err(error) => {
+                    self.arena_full = Some(error);
+                    ControlFlow::Break(())
+                }
+            }
         });
     }
 }
@@ -366,31 +406,49 @@ impl<
         assert_eq!(self.state, AStarState::Empty);
 
         self.state = AStarState::Init;
-        let index = self.nodes.insert(node(&self.context));
+        // The arena is empty, so it has room for the root.
+        let index = self
+            .nodes
+            .insert(node(&self.context))
+            .expect("an empty arena has room for a node");
         self.open_list.push(index, &self.nodes);
     }
 
-    pub fn search(
-        &mut self,
-    ) -> AStarResult<<Context::Node as AStarNode>::Identifier, <Context::Node as AStarNode>::Cost>
-    {
+    /// Searches until a target node (see [`AStarContext::is_target`]) is closed.
+    ///
+    /// Returns the outcome of the search, see [`AStarResult`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AStarError::ArenaFull`] if the search needs more nodes at the same time than the index type `I` allows.
+    /// Then the search cannot be continued.
+    pub fn search(&mut self) -> AStarSearchResult<Context::Node> {
         self.search_until(|context, node| context.is_target(node))
     }
 
+    /// Like [`Self::search`], but with a custom target condition.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::search`].
     pub fn search_until(
         &mut self,
         is_target: impl FnMut(&Context, &Context::Node) -> bool,
-    ) -> AStarResult<<Context::Node as AStarNode>::Identifier, <Context::Node as AStarNode>::Cost>
-    {
+    ) -> AStarSearchResult<Context::Node> {
         self.search_until_with_target_policy(is_target, false)
     }
 
+    /// Like [`Self::search_until`], but if `abort_on_first_target` is set, then the search also returns the first
+    /// target it finds when it is label-correcting.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::search`].
     pub fn search_until_with_target_policy(
         &mut self,
         mut is_target: impl FnMut(&Context, &Context::Node) -> bool,
         abort_on_first_target: bool,
-    ) -> AStarResult<<Context::Node as AStarNode>::Identifier, <Context::Node as AStarNode>::Cost>
-    {
+    ) -> AStarSearchResult<Context::Node> {
         assert!(matches!(
             self.state,
             AStarState::Init | AStarState::Searching | AStarState::Terminated { .. }
@@ -407,7 +465,7 @@ impl<
             (memory_limit as f64 / Context::Node::required_memory() as f64 / 2.3).round() as usize;
 
         if self.open_list.is_empty() {
-            return AStarResult::NoTarget;
+            return Ok(AStarResult::NoTarget);
         }
 
         self.state = AStarState::Searching;
@@ -432,12 +490,12 @@ impl<
                     self.state = AStarState::Terminated {
                         result: AStarResult::ExceededCostLimit { cost_limit },
                     };
-                    return AStarResult::ExceededCostLimit { cost_limit };
+                    return Ok(AStarResult::ExceededCostLimit { cost_limit });
                 } else {
                     self.state = AStarState::Terminated {
                         result: AStarResult::NoTarget,
                     };
-                    return AStarResult::NoTarget;
+                    return Ok(AStarResult::NoTarget);
                 }
             };
             // The node is moved out of the arena while it is processed, and its slot is either filled again
@@ -451,7 +509,7 @@ impl<
                 self.state = AStarState::Terminated {
                     result: AStarResult::ExceededCostLimit { cost_limit },
                 };
-                return AStarResult::ExceededCostLimit { cost_limit };
+                return Ok(AStarResult::ExceededCostLimit { cost_limit });
             }
 
             // Check memory limit.
@@ -462,9 +520,9 @@ impl<
                         max_cost: node.cost(),
                     },
                 };
-                return AStarResult::ExceededMemoryLimit {
+                return Ok(AStarResult::ExceededMemoryLimit {
                     max_cost: node.cost(),
-                };
+                });
             }
 
             // If label-correcting, abort when the first node more expensive than the cheapest target is visited.
@@ -573,12 +631,22 @@ impl<
                 applied_cost_limit: false,
                 pushed: 0,
                 skipped: 0,
+                arena_full: None,
             };
             self.context.generate_successors(&node, &mut successors);
             applied_cost_limit = applied_cost_limit || successors.applied_cost_limit;
             // Skipped successors count as opened and suboptimal, like they did when they were skipped after popping them.
             self.performance_counters.opened_nodes += successors.pushed + successors.skipped;
             self.performance_counters.suboptimal_opened_nodes += successors.skipped;
+
+            if let Some(error) = successors.arena_full {
+                self.nodes.release(node_index);
+                let error = AStarError::from(error);
+                self.state = AStarState::Failed {
+                    error: error.clone(),
+                };
+                return Err(error);
+            }
 
             if is_target
                 && (node.cost() < target_cost
@@ -620,7 +688,7 @@ impl<
             self.state = AStarState::Terminated {
                 result: AStarResult::NoTarget,
             };
-            return AStarResult::NoTarget;
+            return Ok(AStarResult::NoTarget);
         };
 
         let cost = self.closed_node(&target_identifier).unwrap().cost();
@@ -636,10 +704,10 @@ impl<
                 cost,
             },
         };
-        AStarResult::FoundTarget {
+        Ok(AStarResult::FoundTarget {
             identifier: target_identifier,
             cost,
-        }
+        })
     }
 
     pub fn backtrack(

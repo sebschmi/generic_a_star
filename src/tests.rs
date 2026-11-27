@@ -3,8 +3,8 @@
 use std::fmt::Display;
 
 use crate::{
-    AStar, AStarContext, AStarIdentifier, AStarNode, AStarResult,
-    arena::ArenaIndex,
+    AStar, AStarContext, AStarError, AStarIdentifier, AStarNode, AStarResult, AStarState,
+    arena::{ArenaFullError, ArenaIndex},
     closed_lists::{AStarClosedList, HashClosedList},
     cost::{AStarCost, U64Cost},
     open_lists::{AStarOpenList, linear_heap::LinearHeap},
@@ -71,7 +71,8 @@ impl AStarNode for Node {
 
 /// A graph given as weighted edges `(from, to, cost)`, with root `0`.
 struct Context {
-    edges: Vec<(usize, usize, u64)>,
+    /// The outgoing edges `(to, cost)` of each node.
+    successors: Vec<Vec<(usize, u64)>>,
     /// The A* lower bound of each node, or zero if the node has no entry.
     lower_bounds: Vec<u64>,
     target: usize,
@@ -81,8 +82,15 @@ struct Context {
 
 impl Context {
     fn new(edges: Vec<(usize, usize, u64)>, target: usize) -> Self {
+        let mut successors = Vec::new();
+        for (from, to, cost) in edges {
+            if successors.len() <= from {
+                successors.resize_with(from + 1, Vec::new);
+            }
+            successors[from].push((to, cost));
+        }
         Self {
-            edges,
+            successors,
             lower_bounds: Vec::new(),
             target,
             cost_limit: None,
@@ -117,10 +125,11 @@ impl AStarContext for Context {
 
     fn generate_successors(&mut self, node: &Self::Node, output: &mut impl Extend<Self::Node>) {
         output.extend(
-            self.edges
-                .iter()
-                .filter(|(from, _, _)| *from == node.identifier)
-                .map(|&(_, to, cost)| Node {
+            self.successors
+                .get(node.identifier)
+                .into_iter()
+                .flatten()
+                .map(|&(to, cost)| Node {
                     identifier: to,
                     predecessor: Some(node.identifier),
                     cost: node.cost + U64Cost::from(cost),
@@ -154,7 +163,7 @@ fn search(cost_limit: Option<u64>, label_setting: bool) -> AStarResult<usize, U6
         ..Context::new(vec![(0, 1, 3), (0, 2, 4)], 1)
     });
     a_star.initialise();
-    a_star.search()
+    a_star.search().unwrap()
 }
 
 /// The cost limit is inclusive: a target whose cost equals the limit is found,
@@ -208,7 +217,7 @@ fn closed_successors_are_not_pushed() {
         });
         a_star.initialise();
         assert_eq!(
-            a_star.search(),
+            a_star.search().unwrap(),
             AStarResult::FoundTarget {
                 identifier: 4,
                 cost: 13u64.into(),
@@ -297,7 +306,7 @@ fn check_search<
     case: &str,
 ) {
     a_star.initialise();
-    let result = a_star.search();
+    let result = a_star.search().unwrap();
     check_no_leaked_nodes(a_star, case);
     match distance {
         Some(distance) => {
@@ -416,7 +425,7 @@ fn resumed_search_closes_all_nodes_within_cost_limit() {
         let distances = distances(&edges, node_count, 0);
         let mut a_star = AStar::<_>::new(Context::new(edges.clone(), target));
         a_star.initialise();
-        let first_result = a_star.search();
+        let first_result = a_star.search().unwrap();
         let case = format!("case {case}: edges {edges:?}, target {target}");
         let Some(target_distance) = distances[target] else {
             assert_eq!(first_result, AStarResult::NoTarget, "{case}");
@@ -425,7 +434,9 @@ fn resumed_search_closes_all_nodes_within_cost_limit() {
         assert_eq!(first_result.cost(), target_distance.into(), "{case}");
 
         let cost_limit = target_distance + random.below(10);
-        a_star.search_until_with_target_policy(|_, node| node.cost > cost_limit.into(), true);
+        a_star
+            .search_until_with_target_policy(|_, node| node.cost > cost_limit.into(), true)
+            .unwrap();
 
         for (identifier, distance) in distances.iter().enumerate() {
             if let Some(distance) = *distance
@@ -447,6 +458,70 @@ fn resumed_search_closes_all_nodes_within_cost_limit() {
             assert!(
                 a_star.backtrack_from(&node.identifier).unwrap().count() < node_count,
                 "{case}"
+            );
+        }
+    }
+}
+
+/// A search that needs more nodes at the same time than its index type allows fails with an error
+/// instead of panicking, and the same search with a larger index type succeeds.
+#[test]
+fn full_arena_is_an_error() {
+    // The root has more successors than an arena with u16 indices can hold, and the target is behind the last one.
+    let successor_count = <u16 as ArenaIndex>::CAPACITY + 10;
+    let mut edges: Vec<_> = (1..=successor_count).map(|to| (0, to, 1)).collect();
+    edges.push((successor_count, successor_count + 1, 1));
+    let target = successor_count + 1;
+
+    for label_setting in [true, false] {
+        let context = || Context {
+            label_setting,
+            ..Context::new(edges.clone(), target)
+        };
+
+        let mut a_star = AStar::<_, u16>::new(context());
+        a_star.initialise();
+        let expected_error = AStarError::ArenaFull(ArenaFullError {
+            capacity: 65_535,
+            index_type: "u16",
+        });
+        assert_eq!(a_star.search(), Err(expected_error.clone()));
+        assert_eq!(
+            a_star.state(),
+            &AStarState::Failed {
+                error: expected_error.clone()
+            }
+        );
+        assert_eq!(
+            expected_error.to_string(),
+            "the A* node arena is full: it can hold at most 65535 nodes with u16 node indices"
+        );
+        // All successors that fit were opened.
+        assert_eq!(a_star.performance_counters().opened_nodes, 65_534);
+
+        // The linear heap behaves the same.
+        let mut a_star = AStar::<_, u16, HashClosedList<_>, LinearHeap<_, _>>::new(context());
+        a_star.initialise();
+        assert_eq!(a_star.search(), Err(expected_error));
+
+        for result in [
+            {
+                let mut a_star = AStar::<_>::new(context());
+                a_star.initialise();
+                a_star.search()
+            },
+            {
+                let mut a_star = AStar::<_, u64>::new(context());
+                a_star.initialise();
+                a_star.search()
+            },
+        ] {
+            assert_eq!(
+                result,
+                Ok(AStarResult::FoundTarget {
+                    identifier: target,
+                    cost: 2u64.into(),
+                })
             );
         }
     }

@@ -97,6 +97,30 @@ impl<I: ArenaIndex> Display for NodeIndex<I> {
     }
 }
 
+/// The error of inserting a node into a full [`NodeArena`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[error(
+    "the A* node arena is full: it can hold at most {capacity} nodes with {index_type} node indices"
+)]
+pub struct ArenaFullError {
+    /// The maximum number of nodes in the arena, see [`ArenaIndex::CAPACITY`].
+    pub capacity: usize,
+    /// The name of the index type of the arena, see [`ArenaIndex::NAME`].
+    pub index_type: &'static str,
+}
+
+impl ArenaFullError {
+    /// Creates the error for an arena with index type `I`.
+    #[cold]
+    #[inline(never)]
+    pub fn new<I: ArenaIndex>() -> Self {
+        Self {
+            capacity: I::CAPACITY,
+            index_type: I::NAME,
+        }
+    }
+}
+
 /// The base-2 logarithm of the number of slots of a chunk.
 const CHUNK_SIZE_LOG2: u32 = 16;
 const CHUNK_SIZE: usize = 1 << CHUNK_SIZE_LOG2;
@@ -111,7 +135,7 @@ const CHUNK_SIZE: usize = 1 << CHUNK_SIZE_LOG2;
 /// [`Reset::reset`] removes all nodes, but keeps the chunks for reuse.
 ///
 /// The arena holds at most [`I::CAPACITY`](ArenaIndex::CAPACITY) nodes at the same time.
-/// Inserting more panics.
+/// Inserting more returns an [`ArenaFullError`].
 pub struct NodeArena<Node, I: ArenaIndex = u32> {
     /// Each chunk holds up to [`CHUNK_SIZE`] slots, and only the last chunk is not full.
     chunks: Vec<Vec<Option<Node>>>,
@@ -149,21 +173,20 @@ impl<Node, I: ArenaIndex> NodeArena<Node, I> {
 
     /// Inserts a node and returns its index.
     ///
-    /// **Panics** if the arena would contain more than [`I::CAPACITY`](ArenaIndex::CAPACITY) nodes.
+    /// Returns an [`ArenaFullError`] (and drops the node) if the arena already contains
+    /// [`I::CAPACITY`](ArenaIndex::CAPACITY) nodes.
     #[inline]
-    pub fn insert(&mut self, node: Node) -> NodeIndex<I> {
+    pub fn insert(&mut self, node: Node) -> Result<NodeIndex<I>, ArenaFullError> {
         if let Some(index) = self.free_slots.pop() {
             let slot = self.slot_mut(index);
             debug_assert!(slot.is_none());
             *slot = Some(node);
-            return index;
+            return Ok(index);
         }
 
-        assert!(
-            self.slot_count < I::CAPACITY,
-            "an arena can hold at most {} nodes",
-            I::CAPACITY
-        );
+        if self.slot_count >= I::CAPACITY {
+            return Err(ArenaFullError::new::<I>());
+        }
         let index = NodeIndex(I::from_usize(self.slot_count));
         let (chunk, offset) = Self::locate(self.slot_count);
         if chunk == self.chunks.len() {
@@ -178,7 +201,7 @@ impl<Node, I: ArenaIndex> NodeArena<Node, I> {
         debug_assert_eq!(chunk.len(), offset);
         chunk.push(Some(node));
         self.slot_count += 1;
-        index
+        Ok(index)
     }
 
     #[inline]
@@ -288,7 +311,7 @@ impl<Node, I: ArenaIndex> Debug for NodeArena<Node, I> {
 mod tests {
     use crate::reset::Reset;
 
-    use super::{CHUNK_SIZE, NodeArena, NodeIndex};
+    use super::{ArenaFullError, ArenaIndex, CHUNK_SIZE, NodeArena, NodeIndex};
 
     #[test]
     fn locate() {
@@ -307,7 +330,7 @@ mod tests {
     fn insert_remove_reuse() {
         let mut arena = NodeArena::<_>::new();
         let count = 2 * CHUNK_SIZE + 10_000;
-        let indices: Vec<_> = (0..count).map(|i| arena.insert(i)).collect();
+        let indices: Vec<_> = (0..count).map(|i| arena.insert(i).unwrap()).collect();
         assert_eq!(arena.len(), count);
         for (i, &index) in indices.iter().enumerate() {
             assert_eq!(index, NodeIndex(i as u32));
@@ -321,10 +344,10 @@ mod tests {
         assert_eq!(arena.len(), count - 2);
 
         // Released slots are reused before new slots are added.
-        let a = arena.insert(100_000);
-        let b = arena.insert(100_001);
+        let a = arena.insert(100_000).unwrap();
+        let b = arena.insert(100_001).unwrap();
         assert_eq!([a, b], [indices[42], indices[17]]);
-        assert_eq!(arena.insert(100_002), NodeIndex(count as u32));
+        assert_eq!(arena.insert(100_002), Ok(NodeIndex(count as u32)));
 
         let taken = arena.take(indices[5]);
         arena.put_back(indices[5], taken + 1);
@@ -335,7 +358,7 @@ mod tests {
         let chunk_capacities: Vec<_> = arena.chunks.iter().map(Vec::capacity).collect();
         arena.reset();
         assert!(arena.is_empty());
-        assert_eq!(arena.insert(5), NodeIndex(0));
+        assert_eq!(arena.insert(5), Ok(NodeIndex(0)));
         assert_eq!(
             arena.chunks.iter().map(Vec::capacity).collect::<Vec<_>>(),
             chunk_capacities
@@ -343,10 +366,49 @@ mod tests {
     }
 
     #[test]
+    fn capacities() {
+        assert_eq!(<u16 as ArenaIndex>::CAPACITY, 65_535);
+        assert_eq!(<u32 as ArenaIndex>::CAPACITY, 4_294_967_295);
+        assert_eq!(<u64 as ArenaIndex>::CAPACITY, usize::MAX);
+        assert_eq!(<u32 as ArenaIndex>::NAME, "u32");
+    }
+
+    /// A full arena returns an error instead of panicking, and accepts nodes again once a slot is free.
+    #[test]
+    fn full_arena() {
+        let mut arena = NodeArena::<usize, u16>::new();
+        let capacity = <u16 as ArenaIndex>::CAPACITY;
+        let indices: Vec<_> = (0..capacity).map(|i| arena.insert(i).unwrap()).collect();
+        assert_eq!(arena.len(), capacity);
+        assert_eq!(indices.last(), Some(&NodeIndex(u16::MAX - 1)));
+
+        let error = arena.insert(capacity).unwrap_err();
+        assert_eq!(
+            error,
+            ArenaFullError {
+                capacity: 65_535,
+                index_type: "u16"
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "the A* node arena is full: it can hold at most 65535 nodes with u16 node indices"
+        );
+        assert_eq!(arena.len(), capacity);
+
+        assert_eq!(arena.remove(indices[7]), 7);
+        assert_eq!(arena.insert(capacity), Ok(indices[7]));
+        assert!(arena.insert(capacity + 1).is_err());
+
+        arena.reset();
+        assert_eq!(arena.insert(1), Ok(NodeIndex(0)));
+    }
+
+    #[test]
     #[should_panic]
     fn get_removed() {
         let mut arena = NodeArena::<_>::new();
-        let index = arena.insert(1);
+        let index = arena.insert(1).unwrap();
         arena.remove(index);
         let _ = arena[index];
     }

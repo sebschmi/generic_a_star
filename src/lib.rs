@@ -12,7 +12,7 @@ use num_traits::{Bounded, Zero};
 use reset::Reset;
 
 use crate::{
-    arena::NodeArena,
+    arena::{ArenaIndex, NodeArena},
     closed_lists::{AStarClosedList, HashClosedList},
     open_lists::{AStarOpenList, binary_heap::BinaryHeap},
 };
@@ -138,15 +138,20 @@ pub enum AStarState<NodeIdentifier, Cost> {
 ///
 /// All nodes are stored in a [`NodeArena`], and the open and closed lists refer to them by [`NodeIndex`](arena::NodeIndex).
 /// Nodes that are dropped from the search (because they are dominated or exceed the cost limit) free their slot for reuse.
+///
+/// `I` is the integer type of the node indices, see [`ArenaIndex`].
+/// It limits how many nodes can be stored at the same time:
+/// the default [`u32`] allows `u32::MAX` nodes, and [`u64`] removes the limit, but needs more memory for the open and closed lists.
 #[derive(Debug)]
 pub struct AStar<
     Context: AStarContext,
-    ClosedList: AStarClosedList<Context::Node> = HashClosedList,
-    OpenList: AStarOpenList<Context::Node> = BinaryHeap<<Context as AStarContext>::Node>,
+    I: ArenaIndex = u32,
+    ClosedList: AStarClosedList<Context::Node, I> = HashClosedList<I>,
+    OpenList: AStarOpenList<Context::Node, I> = BinaryHeap<<Context as AStarContext>::Node, I>,
 > {
     state: AStarState<<Context::Node as AStarNode>::Identifier, <Context::Node as AStarNode>::Cost>,
     context: Context,
-    nodes: NodeArena<Context::Node>,
+    nodes: NodeArena<Context::Node, I>,
     closed_list: ClosedList,
     open_list: OpenList,
     performance_counters: AStarPerformanceCounters,
@@ -156,10 +161,11 @@ pub struct AStar<
 #[derive(Debug)]
 pub struct AStarBuffers<
     Node: AStarNode,
-    ClosedList: AStarClosedList<Node> = HashClosedList,
-    OpenList: AStarOpenList<Node> = BinaryHeap<Node>,
+    I: ArenaIndex = u32,
+    ClosedList: AStarClosedList<Node, I> = HashClosedList<I>,
+    OpenList: AStarOpenList<Node, I> = BinaryHeap<Node, I>,
 > {
-    nodes: NodeArena<Node>,
+    nodes: NodeArena<Node, I>,
     closed_list: ClosedList,
     open_list: OpenList,
     phantom_data: PhantomData<Node>,
@@ -170,10 +176,11 @@ pub struct AStarBuffers<
 struct SuccessorSink<
     'a,
     Node: AStarNode,
-    ClosedList: AStarClosedList<Node>,
-    OpenList: AStarOpenList<Node>,
+    I: ArenaIndex,
+    ClosedList: AStarClosedList<Node, I>,
+    OpenList: AStarOpenList<Node, I>,
 > {
-    nodes: &'a mut NodeArena<Node>,
+    nodes: &'a mut NodeArena<Node, I>,
     closed_list: &'a ClosedList,
     open_list: &'a mut OpenList,
     cost_limit: Node::Cost,
@@ -183,8 +190,12 @@ struct SuccessorSink<
     skipped: usize,
 }
 
-impl<Node: AStarNode, ClosedList: AStarClosedList<Node>, OpenList: AStarOpenList<Node>> Extend<Node>
-    for SuccessorSink<'_, Node, ClosedList, OpenList>
+impl<
+    Node: AStarNode,
+    I: ArenaIndex,
+    ClosedList: AStarClosedList<Node, I>,
+    OpenList: AStarOpenList<Node, I>,
+> Extend<Node> for SuccessorSink<'_, Node, I, ClosedList, OpenList>
 {
     #[inline]
     fn extend<T: IntoIterator<Item = Node>>(&mut self, iter: T) {
@@ -241,28 +252,31 @@ pub enum AStarResult<NodeIdentifier, Cost> {
 struct BacktrackingIterator<
     'a_star,
     Context: AStarContext,
-    ClosedList: AStarClosedList<Context::Node>,
-    OpenList: AStarOpenList<Context::Node>,
+    I: ArenaIndex,
+    ClosedList: AStarClosedList<Context::Node, I>,
+    OpenList: AStarOpenList<Context::Node, I>,
 > {
-    a_star: &'a_star AStar<Context, ClosedList, OpenList>,
+    a_star: &'a_star AStar<Context, I, ClosedList, OpenList>,
     current: <Context::Node as AStarNode>::Identifier,
 }
 
 struct BacktrackingIteratorWithCost<
     'a_star,
     Context: AStarContext,
-    ClosedList: AStarClosedList<Context::Node>,
-    OpenList: AStarOpenList<Context::Node>,
+    I: ArenaIndex,
+    ClosedList: AStarClosedList<Context::Node, I>,
+    OpenList: AStarOpenList<Context::Node, I>,
 > {
-    a_star: &'a_star AStar<Context, ClosedList, OpenList>,
+    a_star: &'a_star AStar<Context, I, ClosedList, OpenList>,
     current: <Context::Node as AStarNode>::Identifier,
 }
 
 impl<
     Context: AStarContext,
-    ClosedList: AStarClosedList<Context::Node>,
-    OpenList: AStarOpenList<Context::Node>,
-> AStar<Context, ClosedList, OpenList>
+    I: ArenaIndex,
+    ClosedList: AStarClosedList<Context::Node, I>,
+    OpenList: AStarOpenList<Context::Node, I>,
+> AStar<Context, I, ClosedList, OpenList>
 {
     pub fn new(context: Context) -> Self {
         Self {
@@ -277,7 +291,7 @@ impl<
 
     pub fn new_with_buffers(
         context: Context,
-        mut buffers: AStarBuffers<Context::Node, ClosedList, OpenList>,
+        mut buffers: AStarBuffers<Context::Node, I, ClosedList, OpenList>,
     ) -> Self {
         buffers.nodes.reset();
         buffers.closed_list.reset();
@@ -311,7 +325,7 @@ impl<
         self.context
     }
 
-    pub fn into_buffers(self) -> AStarBuffers<Context::Node, ClosedList, OpenList> {
+    pub fn into_buffers(self) -> AStarBuffers<Context::Node, I, ClosedList, OpenList> {
         AStarBuffers {
             nodes: self.nodes,
             closed_list: self.closed_list,
@@ -630,7 +644,7 @@ impl<
 
     pub fn backtrack(
         &self,
-    ) -> impl use<'_, Context, ClosedList, OpenList>
+    ) -> impl use<'_, Context, I, ClosedList, OpenList>
     + Iterator<Item = <Context::Node as AStarNode>::EdgeType> {
         let AStarState::Terminated {
             result: AStarResult::FoundTarget { identifier, .. },
@@ -648,7 +662,7 @@ impl<
     /// The cost of the first node is never returned.
     pub fn backtrack_with_costs(
         &self,
-    ) -> impl use<'_, Context, ClosedList, OpenList>
+    ) -> impl use<'_, Context, I, ClosedList, OpenList>
     + Iterator<
         Item = (
             <Context::Node as AStarNode>::EdgeType,
@@ -669,7 +683,7 @@ impl<
         &self,
         identifier: &<Context::Node as AStarNode>::Identifier,
     ) -> Option<
-        impl use<'_, Context, ClosedList, OpenList>
+        impl use<'_, Context, I, ClosedList, OpenList>
         + Iterator<Item = <Context::Node as AStarNode>::EdgeType>,
     > {
         if self
@@ -694,7 +708,7 @@ impl<
         &self,
         identifier: &<Context::Node as AStarNode>::Identifier,
     ) -> Option<
-        impl use<'_, Context, ClosedList, OpenList>
+        impl use<'_, Context, I, ClosedList, OpenList>
         + Iterator<
             Item = (
                 <Context::Node as AStarNode>::EdgeType,
@@ -779,9 +793,10 @@ impl<NodeIdentifier: Clone, Cost> AStarResult<NodeIdentifier, Cost> {
 
 impl<
     Context: AStarContext,
-    ClosedList: AStarClosedList<Context::Node>,
-    OpenList: AStarOpenList<Context::Node>,
-> Iterator for BacktrackingIterator<'_, Context, ClosedList, OpenList>
+    I: ArenaIndex,
+    ClosedList: AStarClosedList<Context::Node, I>,
+    OpenList: AStarOpenList<Context::Node, I>,
+> Iterator for BacktrackingIterator<'_, Context, I, ClosedList, OpenList>
 {
     type Item = <Context::Node as AStarNode>::EdgeType;
 
@@ -800,9 +815,10 @@ impl<
 
 impl<
     Context: AStarContext,
-    ClosedList: AStarClosedList<Context::Node>,
-    OpenList: AStarOpenList<Context::Node>,
-> Iterator for BacktrackingIteratorWithCost<'_, Context, ClosedList, OpenList>
+    I: ArenaIndex,
+    ClosedList: AStarClosedList<Context::Node, I>,
+    OpenList: AStarOpenList<Context::Node, I>,
+> Iterator for BacktrackingIteratorWithCost<'_, Context, I, ClosedList, OpenList>
 {
     type Item = (
         <Context::Node as AStarNode>::EdgeType,
@@ -823,8 +839,12 @@ impl<
     }
 }
 
-impl<Node: AStarNode, ClosedList: AStarClosedList<Node>, OpenList: AStarOpenList<Node>> Default
-    for AStarBuffers<Node, ClosedList, OpenList>
+impl<
+    Node: AStarNode,
+    I: ArenaIndex,
+    ClosedList: AStarClosedList<Node, I>,
+    OpenList: AStarOpenList<Node, I>,
+> Default for AStarBuffers<Node, I, ClosedList, OpenList>
 {
     fn default() -> Self {
         Self {

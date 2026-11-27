@@ -4,6 +4,7 @@ use std::fmt::Display;
 
 use crate::{
     AStar, AStarContext, AStarIdentifier, AStarNode, AStarResult,
+    arena::ArenaIndex,
     closed_lists::{AStarClosedList, HashClosedList},
     cost::{AStarCost, U64Cost},
     open_lists::{AStarOpenList, linear_heap::LinearHeap},
@@ -270,8 +271,12 @@ fn distances(edges: &[(usize, usize, u64)], node_count: usize, source: usize) ->
 }
 
 /// Every node in the arena is either open or closed: dropped nodes release their slots.
-fn check_no_leaked_nodes<ClosedList: AStarClosedList<Node>, OpenList: AStarOpenList<Node>>(
-    a_star: &AStar<Context, ClosedList, OpenList>,
+fn check_no_leaked_nodes<
+    I: ArenaIndex,
+    ClosedList: AStarClosedList<Node, I>,
+    OpenList: AStarOpenList<Node, I>,
+>(
+    a_star: &AStar<Context, I, ClosedList, OpenList>,
     case: &str,
 ) {
     assert_eq!(
@@ -282,8 +287,12 @@ fn check_no_leaked_nodes<ClosedList: AStarClosedList<Node>, OpenList: AStarOpenL
 }
 
 /// Checks that a search finds a target at the shortest distance and that backtracking reproduces that cost.
-fn check_search<ClosedList: AStarClosedList<Node>, OpenList: AStarOpenList<Node>>(
-    a_star: &mut AStar<Context, ClosedList, OpenList>,
+fn check_search<
+    I: ArenaIndex,
+    ClosedList: AStarClosedList<Node, I>,
+    OpenList: AStarOpenList<Node, I>,
+>(
+    a_star: &mut AStar<Context, I, ClosedList, OpenList>,
     distance: Option<u64>,
     case: &str,
 ) {
@@ -365,7 +374,7 @@ fn random_graphs_find_shortest_paths() {
             check_search(&mut a_star, distance, &format!("case {case} with buffers"));
 
             // The linear heap gives the same costs.
-            let mut a_star = AStar::<_, HashClosedList, LinearHeap<_>>::new(Context {
+            let mut a_star = AStar::<_, u32, HashClosedList, LinearHeap<_>>::new(Context {
                 lower_bounds: lower_bounds.clone(),
                 label_setting,
                 ..Context::new(edges.clone(), target)
@@ -375,6 +384,20 @@ fn random_graphs_find_shortest_paths() {
                 distance,
                 &format!("case {case} with linear heap"),
             );
+
+            // The other index types give the same costs.
+            let mut a_star = AStar::<_, u64>::new(Context {
+                lower_bounds: lower_bounds.clone(),
+                label_setting,
+                ..Context::new(edges.clone(), target)
+            });
+            check_search(&mut a_star, distance, &format!("case {case} with u64"));
+            let mut a_star = AStar::<_, u16, HashClosedList<_>, LinearHeap<_, _>>::new(Context {
+                lower_bounds: lower_bounds.clone(),
+                label_setting,
+                ..Context::new(edges.clone(), target)
+            });
+            check_search(&mut a_star, distance, &format!("case {case} with u16"));
         }
     }
 }

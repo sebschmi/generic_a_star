@@ -6,7 +6,7 @@ use rustc_hash::FxBuildHasher;
 
 use crate::{
     AStarNode,
-    arena::{NodeArena, NodeIndex},
+    arena::{ArenaIndex, NodeArena, NodeIndex},
     comparator::AStarNodeComparator,
     reset::Reset,
 };
@@ -17,7 +17,9 @@ use crate::{
 /// Nodes are inserted by their index in the [`NodeArena`] of the search.
 /// The closed list can either keep them in the arena and store their index (like [`HashClosedList`]),
 /// or move them out of the arena into its own storage.
-pub trait AStarClosedList<Node: AStarNode>: Reset {
+///
+/// `I` is the index type of the arena, see [`ArenaIndex`].
+pub trait AStarClosedList<Node: AStarNode, I: ArenaIndex>: Reset {
     /// Create a new empty closed list.
     fn new() -> Self;
 
@@ -36,7 +38,7 @@ pub trait AStarClosedList<Node: AStarNode>: Reset {
     /// The closed list removes the node it does not keep from the arena.
     ///
     /// Returns true if a node was already mapped to the identifier.
-    fn insert(&mut self, index: NodeIndex, nodes: &mut NodeArena<Node>) -> bool;
+    fn insert(&mut self, index: NodeIndex<I>, nodes: &mut NodeArena<Node, I>) -> bool;
 
     /// Return the node specified by `identifier`.
     ///
@@ -44,14 +46,14 @@ pub trait AStarClosedList<Node: AStarNode>: Reset {
     fn get<'nodes>(
         &'nodes self,
         identifier: &<Node as AStarNode>::Identifier,
-        nodes: &'nodes NodeArena<Node>,
+        nodes: &'nodes NodeArena<Node, I>,
     ) -> Option<&'nodes Node>;
 
     /// Returns true if the given identifier is mapped to a node.
     fn contains_identifier(
         &self,
         identifier: &<Node as AStarNode>::Identifier,
-        nodes: &NodeArena<Node>,
+        nodes: &NodeArena<Node, I>,
     ) -> bool {
         self.get(identifier, nodes).is_some()
     }
@@ -59,14 +61,19 @@ pub trait AStarClosedList<Node: AStarNode>: Reset {
     /// Returns an iterator over the nodes in the closed list.
     fn iter<'nodes>(
         &'nodes self,
-        nodes: &'nodes NodeArena<Node>,
+        nodes: &'nodes NodeArena<Node, I>,
     ) -> impl Iterator<Item = &'nodes Node>
     where
         Node: 'nodes;
 
     /// Returns true if the closed list contains a node that is at least as good as `node`,
     /// such that `node` does not need to be expanded.
-    fn can_skip_node(&self, node: &Node, nodes: &NodeArena<Node>, is_label_setting: bool) -> bool {
+    fn can_skip_node(
+        &self,
+        node: &Node,
+        nodes: &NodeArena<Node, I>,
+        is_label_setting: bool,
+    ) -> bool {
         if let Some(previous_visit) = self.get(node.identifier(), nodes) {
             if is_label_setting {
                 // In label-setting mode, if we have already visited the node, we now must be visiting it with a higher or equal cost.
@@ -122,11 +129,13 @@ pub trait AStarClosedList<Node: AStarNode>: Reset {
 /// A closed list that is a hash table of node indices.
 ///
 /// The identifiers are not stored in the table, but read from the nodes in the arena,
-/// so each closed node costs only the four bytes of its index (plus the table overhead).
+/// so each closed node costs only the bytes of its index (plus the table overhead).
 /// The identifiers are hashed with [`FxBuildHasher`].
+///
+/// `I` is the index type of the arena, see [`ArenaIndex`].
 #[derive(Debug, Clone)]
-pub struct HashClosedList {
-    table: HashTable<NodeIndex>,
+pub struct HashClosedList<I: ArenaIndex = u32> {
+    table: HashTable<NodeIndex<I>>,
 }
 
 #[inline]
@@ -134,7 +143,7 @@ fn hash_identifier<Identifier: std::hash::Hash>(identifier: &Identifier) -> u64 
     FxBuildHasher.hash_one(identifier)
 }
 
-impl<Node: AStarNode> AStarClosedList<Node> for HashClosedList {
+impl<Node: AStarNode, I: ArenaIndex> AStarClosedList<Node, I> for HashClosedList<I> {
     #[inline]
     fn new() -> Self {
         Self {
@@ -150,7 +159,7 @@ impl<Node: AStarNode> AStarClosedList<Node> for HashClosedList {
     /// Like [`HashMap::insert`](std::collections::HashMap::insert),
     /// this always replaces an existing node (and removes it from the arena).
     #[inline]
-    fn insert(&mut self, index: NodeIndex, nodes: &mut NodeArena<Node>) -> bool {
+    fn insert(&mut self, index: NodeIndex<I>, nodes: &mut NodeArena<Node, I>) -> bool {
         let previous = {
             let nodes = &*nodes;
             let identifier = nodes[index].identifier();
@@ -181,7 +190,7 @@ impl<Node: AStarNode> AStarClosedList<Node> for HashClosedList {
     fn get<'nodes>(
         &'nodes self,
         identifier: &<Node as AStarNode>::Identifier,
-        nodes: &'nodes NodeArena<Node>,
+        nodes: &'nodes NodeArena<Node, I>,
     ) -> Option<&'nodes Node> {
         self.table
             .find(hash_identifier(identifier), |&existing| {
@@ -193,7 +202,7 @@ impl<Node: AStarNode> AStarClosedList<Node> for HashClosedList {
     #[inline]
     fn iter<'nodes>(
         &'nodes self,
-        nodes: &'nodes NodeArena<Node>,
+        nodes: &'nodes NodeArena<Node, I>,
     ) -> impl Iterator<Item = &'nodes Node>
     where
         Node: 'nodes,
@@ -202,7 +211,7 @@ impl<Node: AStarNode> AStarClosedList<Node> for HashClosedList {
     }
 }
 
-impl Reset for HashClosedList {
+impl<I: ArenaIndex> Reset for HashClosedList<I> {
     #[inline]
     fn reset(&mut self) {
         self.table.clear();

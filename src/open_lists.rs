@@ -1,6 +1,6 @@
 use crate::{
     AStarNode,
-    arena::{NodeArena, NodeIndex},
+    arena::{ArenaIndex, NodeArena, NodeIndex},
     reset::Reset,
 };
 
@@ -12,7 +12,9 @@ pub mod linear_heap;
 /// This is a priority queue of the indices of nodes stored in a [`NodeArena`].
 /// It must sort nodes with [`AStarNodeComparator`](crate::comparator::AStarNodeComparator).
 /// The nodes of all indices in the open list stay in the arena until they are popped.
-pub trait AStarOpenList<Node: AStarNode>: Reset {
+///
+/// `I` is the index type of the arena, see [`ArenaIndex`].
+pub trait AStarOpenList<Node: AStarNode, I: ArenaIndex>: Reset {
     /// Create a new empty open list.
     fn new() -> Self;
 
@@ -25,10 +27,10 @@ pub trait AStarOpenList<Node: AStarNode>: Reset {
     }
 
     /// Add the node with the given index to the priority queue.
-    fn push(&mut self, index: NodeIndex, nodes: &NodeArena<Node>);
+    fn push(&mut self, index: NodeIndex<I>, nodes: &NodeArena<Node, I>);
 
     /// Removes and returns the index of a minimum node from the priority queue.
     ///
     /// Returns `None` if the priority queue is empty.
-    fn pop_min(&mut self, nodes: &NodeArena<Node>) -> Option<NodeIndex>;
+    fn pop_min(&mut self, nodes: &NodeArena<Node, I>) -> Option<NodeIndex<I>>;
 }

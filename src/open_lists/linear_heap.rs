@@ -4,7 +4,7 @@ use num_traits::{Bounded, Zero};
 
 use crate::{
     AStarNode,
-    arena::{NodeArena, NodeIndex},
+    arena::{ArenaIndex, NodeArena, NodeIndex},
     cost::AStarCost,
     open_lists::AStarOpenList,
     reset::Reset,
@@ -18,16 +18,18 @@ use crate::{
 /// Like this, the buckets are allocated once and then only grown.
 /// Freeing them would return the memory of large buckets to the operating system,
 /// and page-fault it in again when the bucket is allocated anew.
-pub struct LinearHeap<Node: AStarNode> {
+///
+/// `I` is the index type of the arena, see [`ArenaIndex`].
+pub struct LinearHeap<Node: AStarNode, I: ArenaIndex = u32> {
     /// The bucket at index `i` contains the nodes with cost `cost_offset + i`.
-    heap: VecDeque<Vec<NodeIndex>>,
+    heap: VecDeque<Vec<NodeIndex<I>>>,
     /// All buckets before this index are empty.
     front: usize,
     cost_offset: Node::Cost,
     len: usize,
 }
 
-impl<Node: AStarNode> AStarOpenList<Node> for LinearHeap<Node> {
+impl<Node: AStarNode, I: ArenaIndex> AStarOpenList<Node, I> for LinearHeap<Node, I> {
     #[inline]
     fn new() -> Self {
         Self {
@@ -43,7 +45,7 @@ impl<Node: AStarNode> AStarOpenList<Node> for LinearHeap<Node> {
         self.len
     }
 
-    fn push(&mut self, node: NodeIndex, nodes: &NodeArena<Node>) {
+    fn push(&mut self, node: NodeIndex<I>, nodes: &NodeArena<Node, I>) {
         let cost = nodes[node].cost();
         assert_ne!(cost, Node::Cost::max_value());
 
@@ -76,7 +78,7 @@ impl<Node: AStarNode> AStarOpenList<Node> for LinearHeap<Node> {
         self.len += 1;
     }
 
-    fn pop_min(&mut self, _nodes: &NodeArena<Node>) -> Option<NodeIndex> {
+    fn pop_min(&mut self, _nodes: &NodeArena<Node, I>) -> Option<NodeIndex<I>> {
         while let Some(front) = self.heap.get_mut(self.front) {
             if front.is_empty() {
                 // Lazily advance the front of the heap, keeping the empty bucket for reuse.
@@ -91,7 +93,7 @@ impl<Node: AStarNode> AStarOpenList<Node> for LinearHeap<Node> {
     }
 }
 
-impl<Node: AStarNode> Reset for LinearHeap<Node> {
+impl<Node: AStarNode, I: ArenaIndex> Reset for LinearHeap<Node, I> {
     #[inline]
     fn reset(&mut self) {
         // Keep the buckets with their capacity for reuse.
@@ -182,7 +184,7 @@ mod tests {
     /// Costs may be lower than the cost of the last popped node.
     /// Checks the popped nodes against the model.
     fn run(heap: &mut LinearHeap<Node>, seed: u64) {
-        let mut arena = NodeArena::new();
+        let mut arena = NodeArena::<_>::new();
         let mut state = seed;
         let mut next = move || {
             state = state
@@ -224,13 +226,13 @@ mod tests {
     #[test]
     fn same_order_as_model() {
         for seed in 0..10 {
-            run(&mut LinearHeap::new(), seed);
+            run(&mut LinearHeap::<_>::new(), seed);
         }
     }
 
     #[test]
     fn reset_keeps_buckets() {
-        let mut heap = LinearHeap::new();
+        let mut heap = LinearHeap::<_>::new();
         run(&mut heap, 0);
         let buckets = heap.heap.len();
         let capacity = capacity(&heap);
